@@ -141,13 +141,14 @@ class PetModel(pl.LightningModule):
 
 
 class MyDataset(Dataset):
-    def __init__(self, img_dir, mask_dir, transform=None, decision=False):
+    def __init__(self, img_dir, mask_dir, transform=None, decision=False, type=None):
         self.img_dir = img_dir
         self.mask_dir = mask_dir
         self.transform = transform
         self.img_filenames = os.listdir(img_dir)
         self.mask_filenames = os.listdir(mask_dir)
         self.decision = decision
+        self.type = type
 
     def __len__(self):
         return len(self.img_filenames)
@@ -162,17 +163,22 @@ class MyDataset(Dataset):
         # Split mask into individual channels
         if self.decision:
             width, height = img.size
-            # Set the fragment size
             fragment_size = 320
-            # Calculate the maximum starting position for the fragment
-            max_start_x = width - fragment_size
-            max_start_y = height - fragment_size
-            # Generate random starting position for the fragment
-            start_x = random.randint(0, max_start_x)
-            start_y = random.randint(0, max_start_y)
-            # Crop the image to get the fragment
-            img = img.crop((start_x, start_y, start_x + fragment_size, start_y + fragment_size))
-            mask = mask.crop((start_x, start_y, start_x + fragment_size, start_y + fragment_size))
+            # Set the fragment size
+            if type:
+                smaller_part = width if width < height else height
+                img = img.crop((0, 0, smaller_part, smaller_part)).resize((fragment_size, fragment_size))
+                mask = mask.crop((0, 0, smaller_part, smaller_part)).resize((fragment_size, fragment_size))
+            else:
+                # Calculate the maximum starting position for the fragment
+                max_start_x = width - fragment_size
+                max_start_y = height - fragment_size
+                # Generate random starting position for the fragment
+                start_x = random.randint(0, max_start_x)
+                start_y = random.randint(0, max_start_y)
+                # Crop the image to get the fragment
+                img = img.crop((start_x, start_y, start_x + fragment_size, start_y + fragment_size))
+                mask = mask.crop((start_x, start_y, start_x + fragment_size, start_y + fragment_size))
 
         mask = np.array(mask)
         mask = mask / 255.0
@@ -200,26 +206,36 @@ def ShowResults(model=None, load_model=None, decision=None):
     if load_model:
         if decision == 'Augmentation':
             main_model = torch.load('./best_model_Augmentation.pth')
+        elif decision == 'Crop':
+            main_model = torch.load('./best_model_Crop.pth')
         else:
             main_model = torch.load('./best_model.pth')
     else:
         main_model = model
 
     model.to(device)
-    masks_folder = "DataBaseMasks"
+    if decision == 'Crop':
+        masks_folder = "Masks"
+    else:
+        masks_folder = "DataBaseMasks"
     masks_filenames = os.listdir(masks_folder)
     # Define a transform to convert image files to tensors
     transform = ToTensor()
     masks = []
     for image_path in masks_filenames:
         mask = Image.open(masks_folder + '/' + image_path).convert('RGB')
+        if decision == 'Crop':
+            smaller_part = mask.width if mask.width < mask.height else mask.height
+            mask = mask.crop((0, 0, smaller_part, smaller_part)).resize((320, 320))
+
         mask = np.array(mask)
         mask = mask / 255.0
         mask = np.array(Image.fromarray(mask.astype('uint8'), 'RGB'))
-        if decision == 'Augmentation':
-            mask_tensor = torch.zeros((320, 320, 4))
-        else:
+        if decision == 'Normal':
             mask_tensor = torch.zeros((480, 480, 4))
+        else:
+            mask_tensor = torch.zeros((320, 320, 4))
+
         mask_tensor[:, :, 0] = torch.as_tensor(mask[:, :, 0])
         mask_tensor[:, :, 1] = torch.as_tensor(mask[:, :, 1])
         mask_tensor[:, :, 2] = torch.as_tensor(mask[:, :, 2])
@@ -259,20 +275,23 @@ def main():
     os.environ["PATH"] += os.pathsep + 'C:/Program Files/Graphviz/bin'
     teach_model = input('Teach model? (Y/N):')
     if teach_model == 'n':
-        decision2 = input('Normal or Augmentation : ')
+        decision2 = input('Normal/Augmentation/Crop? : ')
     else:
-        decision = input('Normal or Augmentation : ')
+        decision = input('Normal/Augmentation/Crop? : ')
         echos = input('Number of Epochs : ')
         showdata = input('Show results after? (Y): ')
         if showdata == 'y':
-            decision2 = input('Normal or Augmentation : ')
+            decision2 = input('Normal/Augmentation/Crop?: ')
         if decision == 'Normal':
             img_dataset = MyDataset("DataBaseImages", "DataBaseMasks", transform=None)
             mask_dataset = MyDataset("DataBaseImages", "DataBaseMasks", transform=None)
         if decision == 'Augmentation':
             img_dataset = MyDataset("Images", "Masks", transform=None, decision=True)
             mask_dataset = MyDataset("Images", "Masks", transform=None, decision=True)
-        if decision != 'Normal' and decision != 'Augmentation':
+        if decision == 'Crop':
+            img_dataset = MyDataset("Images", "Masks", transform=None, decision=True, type=True)
+            mask_dataset = MyDataset("Images", "Masks", transform=None, decision=True, type=True)
+        if decision != 'Normal' and decision != 'Augmentation' and decision != 'Crop':
             exit(2)
         n_cpu = 1
         train_dataloader = DataLoader(img_dataset, batch_size=1, shuffle=True, num_workers=n_cpu)
@@ -299,6 +318,8 @@ def main():
             torch.save(model, './best_model_Augmentation.pth')
         if decision == 'Normal':
             torch.save(model, './best_model_Normal.pth')
+        if decision == 'Crop':
+            torch.save(model, './best_model_Crop.pth')
         if showdata == 'y':
             ShowResults(model, False, decision2)
 
