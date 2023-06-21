@@ -185,3 +185,4 @@ fabric.properties
 # .idea
 lightning_logs/
 .idea/
+/*.pth

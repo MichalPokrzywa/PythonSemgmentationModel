@@ -1,3 +1,5 @@
+import csv
+import gc
 import os
 import random
 import numpy as np
@@ -79,7 +81,6 @@ class PetModel(pl.LightningModule):
         # true negative 'pixels' for each image and class
         # these values will be aggregated in the end of an epoch
         tp, fp, fn, tn = smp.metrics.get_stats(pred_mask.long(), mask.long(), mode="multilabel", num_classes=4)
-
         return {
             "loss": loss,
             "tp": tp,
@@ -113,6 +114,9 @@ class PetModel(pl.LightningModule):
         self.log_dict(metrics, prog_bar=True)
 
     def store_predicted_masks(self, pred_masks):
+        if self.predicted_masks and len(self.predicted_masks) > 210:
+            del self.predicted_masks[0]
+            gc.collect()
         self.predicted_masks.extend(pred_masks)
 
     def get_predicted_masks(self):
@@ -149,6 +153,7 @@ class MyDataset(Dataset):
         self.mask_filenames = os.listdir(mask_dir)
         self.decision = decision
         self.type = type
+        self.mask_tensor = None
 
     def __len__(self):
         return len(self.img_filenames)
@@ -198,10 +203,11 @@ class MyDataset(Dataset):
         if self.transform:
             img_tensor, mask_tensor = self.transform(img_tensor, mask_tensor)
 
+        self.mask_tensor = mask_tensor
         return img_tensor, mask_tensor
 
 
-def ShowResults(model=None, load_model=None, decision=None):
+def ShowResults(model=None, load_model=None, decision=None, get_results=False, epos=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if load_model:
         if decision == 'Augmentation':
@@ -260,13 +266,24 @@ def ShowResults(model=None, load_model=None, decision=None):
     accuracy = smp.metrics.accuracy(tp, fp, fn, tn, reduction="macro")
     recall = smp.metrics.recall(tp, fp, fn, tn, reduction="micro-imagewise")
 
-    # Print the evaluation metrics
-    print("Evaluation Metrics:")
-    print("IoU Score:", iou_score)
-    print("F1 Score:", f1_score)
-    print("F2 Score:", f2_score)
-    print("Accuracy:", accuracy)
-    print("Recall:", recall)
+    if get_results:
+        return {
+            "type": decision,
+            "nr_epochs": epos,
+            "iou_score": float(iou_score),
+            "f1_score": float(f1_score),
+            "f2_score": float(f2_score),
+            "accuracy": float(accuracy),
+            "recall": float(recall),
+        }
+    else:
+        # Print the evaluation metrics
+        print("Evaluation Metrics:")
+        print("IoU Score:", iou_score)
+        print("F1 Score:", f1_score)
+        print("F2 Score:", f2_score)
+        print("Accuracy:", accuracy)
+        print("Recall:", recall)
 
 
 def main():
@@ -277,6 +294,8 @@ def main():
     if teach_model == 'n':
         decision2 = input('Normal/Augmentation/Crop? : ')
     else:
+        make_data = input('Generate report data (Y/N)')
+    if make_data == 'n':
         decision = input('Normal/Augmentation/Crop? : ')
         echos = input('Number of Epochs : ')
         showdata = input('Show results after? (Y): ')
@@ -293,15 +312,17 @@ def main():
             mask_dataset = MyDataset("Images", "Masks", transform=None, decision=True, type=True)
         if decision != 'Normal' and decision != 'Augmentation' and decision != 'Crop':
             exit(2)
+    if teach_model == 'y' and make_data == 'n':
         n_cpu = 1
         train_dataloader = DataLoader(img_dataset, batch_size=1, shuffle=True, num_workers=n_cpu)
         valid_dataloader = DataLoader(mask_dataset, batch_size=1, shuffle=False, num_workers=n_cpu)
-        # test_dataloader = DataLoader(test_dataset, batch_size=16, shuffle=False, num_workers=n_cpu)
+    # test_dataloader = DataLoader(test_dataset, batch_size=16, shuffle=False, num_workers=n_cpu)
 
     model = PetModel("FPN", "resnet34", in_channels=3)
     if teach_model == 'n':
         ShowResults(model, True, decision2)
-    else:
+    elif make_data == 'n':
+
         trainer = pl.Trainer(
             max_epochs=int(echos)
         )
@@ -310,8 +331,7 @@ def main():
             train_dataloader,
             valid_dataloader,
         )
-
-        # # run validation dataset
+        # run validation dataset
         valid_metrics = trainer.validate(model, dataloaders=valid_dataloader, verbose=False)
         pprint(valid_metrics)
         if decision == 'Augmentation':
@@ -322,6 +342,44 @@ def main():
             torch.save(model, './best_model_Crop.pth')
         if showdata == 'y':
             ShowResults(model, False, decision2)
+    else:
+        table_headers = ["type", "nr_epochs", "iou_score", "f1_score", "f2_score", "accuracy", "recall"]
+        rows = []
+        image_type = [1,2,3]  # List of image sizes to generate data for
+        epochs = [1, 5, 25, 50]  # List of numbers of epochs to train for
+        n_cpu = 1
+        for size in image_type:
+            if size == 1:
+                img_dataset = MyDataset("DataBaseImages", "DataBaseMasks", transform=None)
+                mask_dataset = MyDataset("DataBaseImages", "DataBaseMasks", transform=None)
+                decision2 = 'Normal'
+            if size == 2:
+                img_dataset = MyDataset("Images", "Masks", transform=None, decision=True)
+                mask_dataset = MyDataset("Images", "Masks", transform=None, decision=True)
+                decision2 = 'Augmentation'
+            if size == 3:
+                img_dataset = MyDataset("Images", "Masks", transform=None, decision=True, type=True)
+                mask_dataset = MyDataset("Images", "Masks", transform=None, decision=True, type=True)
+                decision2 = 'Crop'
+            train_dataloader = DataLoader(img_dataset, batch_size=1, shuffle=True, num_workers=n_cpu)
+            valid_dataloader = DataLoader(mask_dataset, batch_size=1, shuffle=False, num_workers=n_cpu)
+            for num_epochs in epochs:
+                model = PetModel("FPN", "resnet34", in_channels=3)
+                trainer = pl.Trainer(
+                    max_epochs=num_epochs
+                )
+                trainer.fit(
+                    model,
+                    train_dataloader,
+                    valid_dataloader,
+                )
+                rows.append(ShowResults(model, False, decision2, get_results=True, epos=num_epochs))
+                del model
+                gc.collect()
+        with open('model_report.csv', 'w', encoding='UTF8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=table_headers)
+            writer.writeheader()
+            writer.writerows(rows)
 
 
 if __name__ == "__main__":
