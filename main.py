@@ -31,6 +31,8 @@ class PetModel(pl.LightningModule):
         self.register_buffer("mean", torch.tensor(params["mean"]).view(1, 3, 1, 1))
         # for image segmentation dice loss could be the best first choice
         self.predicted_masks = []
+        self.data_collected = []
+        self.counter = 0
         self.loss_fn = smp.losses.DiceLoss(smp.losses.MULTILABEL_MODE, from_logits=True)
 
     def forward(self, image):
@@ -105,7 +107,19 @@ class PetModel(pl.LightningModule):
         # with "empty" images (images without target class) a large gap could be observed.
         # Empty images influence a lot on per_image_iou and much less on dataset_iou.
         dataset_iou = smp.metrics.iou_score(tp, fp, fn, tn, reduction="micro")
-
+        iou_score = smp.metrics.iou_score(tp, fp, fn, tn, reduction="micro")
+        f1_score = smp.metrics.f1_score(tp, fp, fn, tn, reduction="micro")
+        f2_score = smp.metrics.fbeta_score(tp, fp, fn, tn, beta=2, reduction="micro")
+        accuracy = smp.metrics.accuracy(tp, fp, fn, tn, reduction="macro")
+        recall = smp.metrics.recall(tp, fp, fn, tn, reduction="micro-imagewise")
+        table = {"nr_epochs": self.counter,
+                 "iou_score": float(iou_score),
+                 "f1_score": float(f1_score),
+                 "f2_score": float(f2_score),
+                 "accuracy": float(accuracy),
+                 "recall": float(recall)}
+        self.store_epoch_data(table)
+        self.counter+= 1
         metrics = {
             f"{stage}_per_image_iou": per_image_iou,
             f"{stage}_dataset_iou": dataset_iou,
@@ -121,6 +135,12 @@ class PetModel(pl.LightningModule):
 
     def get_predicted_masks(self):
         return torch.stack(self.predicted_masks).long()
+
+    def store_epoch_data(self, table):
+        self.data_collected.append(table)
+
+    def get_epoch_data(self):
+        return self.data_collected
 
     def training_step(self, batch, batch_idx):
         return self.shared_step(batch, "train")
@@ -343,11 +363,13 @@ def main():
         if showdata == 'y':
             ShowResults(model, False, decision2)
     else:
-        table_headers = ["type", "nr_epochs", "iou_score", "f1_score", "f2_score", "accuracy", "recall"]
+        table_headers = ["nr_epochs", "iou_score", "f1_score", "f2_score", "accuracy", "recall"]
         rows = []
-        image_type = [1,2,3]  # List of image sizes to generate data for
-        epochs = [1, 5, 25, 50]  # List of numbers of epochs to train for
+        image_type = [1, 2, 3]  # List of image sizes to generate data for
+        epochs = 50  # List of numbers of epochs to train for
         n_cpu = 1
+        writer = csv.DictWriter(open('model_report.csv', 'w', encoding='UTF8', newline=''), fieldnames=table_headers)
+        writer.writeheader()
         for size in image_type:
             if size == 1:
                 img_dataset = MyDataset("DataBaseImages", "DataBaseMasks", transform=None)
@@ -363,23 +385,18 @@ def main():
                 decision2 = 'Crop'
             train_dataloader = DataLoader(img_dataset, batch_size=1, shuffle=True, num_workers=n_cpu)
             valid_dataloader = DataLoader(mask_dataset, batch_size=1, shuffle=False, num_workers=n_cpu)
-            for num_epochs in epochs:
-                model = PetModel("FPN", "resnet34", in_channels=3)
-                trainer = pl.Trainer(
-                    max_epochs=num_epochs
-                )
-                trainer.fit(
-                    model,
-                    train_dataloader,
-                    valid_dataloader,
-                )
-                rows.append(ShowResults(model, False, decision2, get_results=True, epos=num_epochs))
-                del model
-                gc.collect()
-        with open('model_report.csv', 'w', encoding='UTF8', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=table_headers)
-            writer.writeheader()
-            writer.writerows(rows)
+            model = PetModel("FPN", "resnet34", in_channels=3)
+            trainer = pl.Trainer(
+                max_epochs=epochs
+            )
+            trainer.fit(
+                model,
+                train_dataloader,
+                valid_dataloader,
+            )
+            writer.writerows(model.get_epoch_data())
+            del model
+            gc.collect()
 
 
 if __name__ == "__main__":
